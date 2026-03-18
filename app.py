@@ -9,154 +9,139 @@ import zipfile
 import io
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error
-from tensorflow.keras.models import load_model
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import LSTM, Dense, Input, Bidirectional, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
 
 # 1. 페이지 설정
 st.set_page_config(page_title="Battery SOH Analyzer Pro", layout="wide")
-st.title("🔋 배터리 SOH 지능형 분석 플랫폼")
-st.markdown("기본 모델 또는 업로드한 모델 패키지(ZIP)를 사용하여 SOH를 예측합니다.")
+st.title("🔋 배터리 SOH 통합 분석 플랫폼")
 
-# --- [설정] 서버 내 기본 모델 경로 ---
+# --- [설정] 기본 모델 확인 ---
 DEFAULT_ZIP = "battery_package.zip"
 has_default = os.path.exists(DEFAULT_ZIP)
 
-# 2. 모델 로드 함수 (ZIP 압축 해제 및 검증)
-def load_model_package(zip_file_source):
-    """
-    zip_file_source: 파일 경로(str) 또는 UploadedFile 객체
-    """
+# 2. 모델 로드 함수 (ZIP)
+def load_model_package(zip_source):
     try:
-        # 파일 경로인 경우와 업로드된 객체인 경우 구분하여 처리
-        if isinstance(zip_file_source, str):
-            z = zipfile.ZipFile(zip_file_source, 'r')
-        else:
-            z = zipfile.ZipFile(zip_file_source, 'r')
-            
+        z = zipfile.ZipFile(zip_source, 'r')
         with z:
             model_files = [f for f in z.namelist() if f.endswith('.keras')]
             scaler_files = [f for f in z.namelist() if f.endswith('.pkl')]
-            
             if not model_files or not scaler_files:
-                return None, None, "ZIP 내부에 .keras 모델 또는 .pkl 스케일러가 없습니다."
-            
-            # 모델 로드 (임시 추출 필요)
+                return None, None, "ZIP 내부에 .keras 또는 .pkl이 없습니다."
             z.extract(model_files[0], "temp_dir")
             model = load_model(f"temp_dir/{model_files[0]}")
-            
-            # 스케일러 로드
             with z.open(scaler_files[0]) as f:
                 sc_X, sc_y = pickle.load(f)
-                
             return model, (sc_X, sc_y), None
     except Exception as e:
         return None, None, str(e)
 
-# 3. 데이터 준비 함수 (SOH 전용)
-def prepare_test_data(df, test_ids, seq_length, sc_X, sc_y):
+# 3. 데이터 준비 함수
+def prepare_data(df, train_ids, test_ids, seq_length, sc_X=None, sc_y=None):
     features, target = ['voltage', 'temperature', 'capacity'], 'soh'
-    X_list, y_list, cycle_list = [], [], []
-    
-    for b_id in test_ids:
-        b_df = df[df['battery_id'] == b_id].sort_values('cycle')
-        if len(b_df) <= seq_length: continue
-        
-        f_s = sc_X.transform(b_df[features])
-        t_s = sc_y.transform(b_df[[target]])
-        
-        for i in range(len(f_s) - seq_length):
-            X_list.append(f_s[i:i+seq_length])
-            y_list.append(t_s[i+seq_length])
-            cycle_list.append(b_df['cycle'].iloc[i+seq_length])
-            
-    return np.array(X_list).astype(np.float32), np.array(y_list).astype(np.float32), np.array(cycle_list)
+    if sc_X is None: # 신규 학습 시 스케일러 생성
+        sc_X, sc_y = MinMaxScaler(), MinMaxScaler()
+        train_df = df[df['battery_id'].isin(train_ids)]
+        if train_df.empty: return None, None, None, None, None, None, None
+        sc_X.fit(train_df[features]); sc_y.fit(train_df[[target]])
 
-# 4. 사이드바 - 모델 및 데이터 설정
-st.sidebar.header("📁 데이터 및 모델 설정")
+    def create_seq(target_ids):
+        X_list, y_list, cycle_list = [], [], []
+        for b_id in target_ids:
+            b_df = df[df['battery_id'] == b_id].sort_values('cycle')
+            if len(b_df) <= seq_length: continue
+            f_s, t_s = sc_X.transform(b_df[features]), sc_y.transform(b_df[[target]])
+            for i in range(len(f_s) - seq_length):
+                X_list.append(f_s[i:i+seq_length]); y_list.append(t_s[i+seq_length])
+                cycle_list.append(b_df['cycle'].iloc[i+seq_length])
+        return np.array(X_list).astype(np.float32), np.array(y_list).astype(np.float32), np.array(cycle_list)
 
-# 4-1. 모델 선택 로직
-st.sidebar.subheader("🤖 모델 소스")
-uploaded_zip = st.sidebar.file_uploader("커스텀 모델(ZIP) 업로드 (선택)", type="zip")
+    X_tr, y_tr, _ = create_seq(train_ids)
+    X_te, y_te, cycles = create_seq(test_ids)
+    return X_tr, y_tr, X_te, y_te, cycles, sc_X, sc_y
 
-if uploaded_zip:
-    st.sidebar.info("✨ 업로드된 커스텀 모델을 사용합니다.")
-    model_source = uploaded_zip
-elif has_default:
-    st.sidebar.success("📦 GitHub 기본 모델을 사용합니다.")
-    model_source = DEFAULT_ZIP
-else:
-    st.sidebar.error("❌ 사용 가능한 모델이 없습니다. ZIP을 업로드하세요.")
-    model_source = None
+# 4. 사이드바 설정
+st.sidebar.header("📂 모드 설정")
+analysis_mode = st.sidebar.radio("작동 모드", ["기본/업로드 모델 사용", "신규 모델 직접 학습"])
 
 st.sidebar.markdown("---")
-# 4-2. 데이터 업로드
-uploaded_csv = st.sidebar.file_uploader("분석할 CSV 데이터 업로드", type="csv")
-window_size = st.sidebar.slider("Window Size (Sequence Length)", 1, 50, 6)
+window_size = st.sidebar.slider("Window Size", 1, 50, 6)
 
-# 5. 메인 로직 실행
-if uploaded_csv and model_source:
+if analysis_mode == "신규 모델 직접 학습":
+    st.sidebar.subheader("🚀 학습 파라미터")
+    epochs = st.sidebar.number_input("Epochs", 10, 500, 150)
+    batch_size = st.sidebar.number_input("Batch Size", 1, 128, 40)
+else:
+    uploaded_zip = st.sidebar.file_uploader("커스텀 ZIP 업로드 (미업로드 시 기본모델 사용)", type="zip")
+
+# 5. 메인 화면 로직
+uploaded_csv = st.file_uploader("CSV 데이터 업로드", type="csv")
+
+if uploaded_csv:
     df = pd.read_csv(uploaded_csv)
     all_ids = sorted(df['battery_id'].unique())
-    
-    st.subheader("🎯 분석 대상 설정")
-    test_ids = st.multiselect("예측할 배터리 ID를 선택하세요", all_ids, default=[all_ids[-1]])
+    test_ids = st.multiselect("🎯 예측 대상 배터리 ID (Test)", all_ids, default=[all_ids[-1]])
 
-    if st.button("🚀 분석 실행"):
-        with st.spinner("모델 로딩 및 분석 중..."):
-            model, scalers, error = load_model_package(model_source)
-            
-            if error:
-                st.error(f"모델 로드 오류: {error}")
+    # --- 모드 1: 기존 모델 활용 ---
+    if analysis_mode == "기본/업로드 모델 사용":
+        model_source = uploaded_zip if uploaded_zip else (DEFAULT_ZIP if has_default else None)
+        
+        if model_source and st.button("🔌 즉시 분석 실행"):
+            model, scalers, err = load_model_package(model_source)
+            if err: st.error(err)
             else:
-                sc_X, sc_y = scalers
-                X_test, y_test, cycles = prepare_test_data(df, test_ids, window_size, sc_X, sc_y)
+                _, _, X_te, y_te, cycles, sc_X, sc_y = prepare_data(df, [], test_ids, window_size, scalers[0], scalers[1])
+                y_p = sc_y.inverse_transform(model.predict(X_te)).flatten()
+                y_a = sc_y.inverse_transform(y_te).flatten()
+                st.session_state['res'] = (y_a, y_p, cycles)
+
+    # --- 모드 2: 신규 학습 및 다운로드 ---
+    else:
+        train_ids = st.multiselect("📚 학습용 배터리 ID (Train)", all_ids, default=[i for i in all_ids if i not in test_ids])
+        if st.button("🚀 학습 시작 및 다운로드 생성"):
+            with st.spinner("모델 학습 중..."):
+                X_tr, y_tr, X_te, y_te, cycles, sc_X, sc_y = prepare_data(df, train_ids, test_ids, window_size)
                 
-                if len(X_test) == 0:
-                    st.warning("데이터가 부족하여 시퀀스를 생성할 수 없습니다. Window Size를 낮춰보세요.")
-                else:
-                    # 예측 및 역스케일링
-                    y_pred_scaled = model.predict(X_test)
-                    y_pred = sc_y.inverse_transform(y_pred_scaled).flatten()
-                    y_actual = sc_y.inverse_transform(y_test).flatten()
-                    
-                    st.success("✅ 분석이 완료되었습니다!")
-                    
-                    # 6. 결과 시각화
-                    col_l, col_r = st.columns([7, 3])
-                    with col_l:
-                        st.subheader("📈 SOH 예측 결과 그래프")
-                        fig, ax = plt.subplots(figsize=(10, 5))
-                        ax.plot(cycles, y_actual, label='Actual SOH', color='#3498db', linewidth=2)
-                        ax.plot(cycles, y_pred, label='Predicted SOH', color='#e67e22', linestyle='--')
-                        ax.set_xlabel("Cycle")
-                        ax.set_ylabel("SOH (State of Health)")
-                        ax.legend()
-                        ax.grid(True, alpha=0.3)
-                        st.pyplot(fig)
-                    
-                    with col_r:
-                        st.subheader("📋 수치 데이터 요약")
-                        res_df = pd.DataFrame({
-                            'Cycle': cycles.astype(int),
-                            'Actual': np.round(y_actual, 4),
-                            'Predicted': np.round(y_pred, 4)
-                        })
-                        st.dataframe(res_df.head(50), use_container_width=True)
-                        
-                        mae = mean_absolute_error(y_actual, y_pred)
-                        st.metric("평균 절대 오차 (MAE)", f"{mae:.5f}")
-                        
-                        # 결과 다운로드
-                        csv_data = res_df.to_csv(index=False).encode('utf-8')
-                        st.download_button("📥 결과 CSV 다운로드", csv_data, "prediction_results.csv", "text/csv")
-else:
-    # 초기 화면 안내
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info("👈 왼쪽 사이드바에서 분석할 **CSV 데이터**를 업로드해 주세요.")
-    with col2:
-        if not has_default and not uploaded_zip:
-            st.warning("⚠️ 현재 서버에 기본 모델이 없습니다. GitHub에 `battery_package.zip`을 추가하거나 파일을 업로드하세요.")
-        elif uploaded_zip:
-            st.success("✅ 커스텀 모델이 준비되었습니다.")
-        else:
-            st.success("✅ 기본 모델(`battery_package.zip`)이 준비되었습니다.")
+                # 모델 구축 (Bi-LSTM)
+                model = Sequential([
+                    Input(shape=(window_size, X_tr.shape[2])),
+                    Bidirectional(LSTM(128, return_sequences=True, activation='tanh')),
+                    Dropout(0.1),
+                    Bidirectional(LSTM(64, activation='tanh')),
+                    Dense(32, activation='relu'), Dense(1)
+                ])
+                model.compile(optimizer='adam', loss='mse')
+                
+                bar = st.progress(0)
+                model.fit(X_tr, y_tr, epochs=epochs, batch_size=batch_size, verbose=0,
+                          callbacks=[tf.keras.callbacks.LambdaCallback(on_epoch_end=lambda e,l: bar.progress((e+1)/epochs))])
+                
+                y_p = sc_y.inverse_transform(model.predict(X_te)).flatten()
+                y_a = sc_y.inverse_transform(y_te).flatten()
+                st.session_state['res'] = (y_a, y_p, cycles)
+
+                # --- [추가] 학습 완료 후 ZIP 다운로드 버튼 생성 ---
+                model.save("new_model.keras")
+                with open("new_sc.pkl", "wb") as f: pickle.dump((sc_X, sc_y), f)
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, "w") as z:
+                    z.write("new_model.keras"); z.write("new_sc.pkl")
+                
+                st.success("🎉 학습이 완료되었습니다! 아래 버튼으로 모델을 저장하세요.")
+                st.download_button("📥 학습된 모델 패키지(ZIP) 다운로드", zip_buf.getvalue(), "battery_package.zip")
+
+    # 6. 결과 출력
+    if 'res' in st.session_state:
+        y_actual, y_pred, cycles = st.session_state['res']
+        st.divider()
+        c1, c2 = st.columns([7, 3])
+        with c1:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.plot(cycles, y_actual, label='Actual', color='#3498db')
+            ax.plot(cycles, y_pred, label='Predicted', color='#e67e22', linestyle='--')
+            ax.legend(); st.pyplot(fig)
+        with c2:
+            st.metric("MAE", f"{mean_absolute_error(y_actual, y_pred):.5f}")
+            st.dataframe(pd.DataFrame({'Cycle': cycles, 'Actual': y_actual, 'Pred': y_pred}).head(20))
