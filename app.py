@@ -11,7 +11,7 @@ from tensorflow.keras.callbacks import EarlyStopping
 
 # 1. 페이지 설정
 st.set_page_config(page_title="Battery SOH Research Lab", layout="wide")
-st.title("🔋 Bi-LSTM 기반 배터리 SOH 정밀 예측 플랫폼")
+st.title("🔋 LSTM 기반 배터리 SOH 예측")
 st.markdown("본 모델은 **Bidirectional LSTM** 구조를 사용하여 배터리 열화 곡선을 추종합니다.")
 
 # 2. 사이드바 설정 (논문 기반 파라미터)
@@ -64,7 +64,7 @@ if uploaded_file:
     train_ids = st.sidebar.multiselect("학습용 배터리 ID", all_ids, default=all_ids[:-1])
     test_ids = st.sidebar.multiselect("테스트용 배터리 ID", all_ids, default=[all_ids[-1]])
 
-    if st.button("🚀 논문 설정으로 학습 및 분석 시작"):
+    if st.button("🚀 학습 및 분석 시작"):
         if not train_ids or not test_ids:
             st.error("⚠️ 학습용과 테스트용 배터리를 선택해주세요.")
         else:
