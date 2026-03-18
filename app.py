@@ -12,7 +12,7 @@ from tensorflow.keras.callbacks import EarlyStopping
 # 1. 페이지 설정
 st.set_page_config(page_title="Battery SOH Research Lab", layout="wide")
 st.title("🔋 LSTM 기반 배터리 SOH 예측")
-st.markdown("본 모델은 **Bidirectional LSTM** 구조를 사용하여 배터리 열화 곡선을 추종합니다.")
+st.markdown("본 모델은 LSTM 구조를 사용하여 배터리 열화 곡선을 추종합니다.")
 
 # 2. 사이드바 설정 (논문 기반 파라미터)
 st.sidebar.header("🔬 학습 설정 (Default)")
@@ -54,7 +54,7 @@ def prepare_battery_data(df, train_ids, test_ids, seq_length):
     return X_train, y_train, X_test, y_test, test_cycles, sc_target
 
 # 4. 파일 업로드 섹션
-uploaded_file = st.file_uploader("NASA 배터리 CSV 데이터를 업로드하세요", type="csv")
+uploaded_file = st.file_uploader("배터리 CSV 데이터를 업로드하세요", type="csv")
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
