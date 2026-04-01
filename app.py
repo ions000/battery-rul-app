@@ -12,6 +12,7 @@ from sklearn.metrics import mean_absolute_error
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Input, Bidirectional, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
+from datetime import datetime
 
 # 1. 페이지 설정
 st.set_page_config(page_title="Battery SOH Analyzer Pro", layout="wide")
@@ -30,8 +31,12 @@ def load_model_package(zip_source):
             scaler_files = [f for f in z.namelist() if f.endswith('.pkl')]
             if not model_files or not scaler_files:
                 return None, None, "ZIP 내부에 .keras 또는 .pkl이 없습니다."
+            
+            if not os.path.exists("temp_dir"):
+                os.makedirs("temp_dir")
             z.extract(model_files[0], "temp_dir")
             model = load_model(f"temp_dir/{model_files[0]}")
+            
             with z.open(scaler_files[0]) as f:
                 sc_X, sc_y = pickle.load(f)
             return model, (sc_X, sc_y), None
@@ -104,7 +109,6 @@ if uploaded_csv:
             with st.spinner("모델 학습 중..."):
                 X_tr, y_tr, X_te, y_te, cycles, sc_X, sc_y = prepare_data(df, train_ids, test_ids, window_size)
                 
-                # 모델 구축 (Bi-LSTM)
                 model = Sequential([
                     Input(shape=(window_size, X_tr.shape[2])),
                     Bidirectional(LSTM(128, return_sequences=True, activation='tanh')),
@@ -122,26 +126,37 @@ if uploaded_csv:
                 y_a = sc_y.inverse_transform(y_te).flatten()
                 st.session_state['res'] = (y_a, y_p, cycles)
 
-                # --- [추가] 학습 완료 후 ZIP 다운로드 버튼 생성 ---
                 model.save("new_model.keras")
                 with open("new_sc.pkl", "wb") as f: pickle.dump((sc_X, sc_y), f)
                 zip_buf = io.BytesIO()
                 with zipfile.ZipFile(zip_buf, "w") as z:
                     z.write("new_model.keras"); z.write("new_sc.pkl")
                 
-                st.success("🎉 학습이 완료되었습니다! 아래 버튼으로 모델을 저장하세요.")
+                st.success("🎉 학습이 완료되었습니다!")
                 st.download_button("📥 학습된 모델 패키지(ZIP) 다운로드", zip_buf.getvalue(), "battery_package.zip")
 
-    # 6. 결과 출력
+    # 6. 결과 출력 및 CSV 내보내기
     if 'res' in st.session_state:
         y_actual, y_pred, cycles = st.session_state['res']
         st.divider()
         c1, c2 = st.columns([7, 3])
+        
         with c1:
             fig, ax = plt.subplots(figsize=(10, 4))
             ax.plot(cycles, y_actual, label='Actual', color='#3498db')
             ax.plot(cycles, y_pred, label='Predicted', color='#e67e22', linestyle='--')
             ax.legend(); st.pyplot(fig)
+            
         with c2:
             st.metric("MAE", f"{mean_absolute_error(y_actual, y_pred):.5f}")
-            st.dataframe(pd.DataFrame({'Cycle': cycles, 'Actual': y_actual, 'Pred': y_pred}).head(20))
+            res_df = pd.DataFrame({'Cycle': cycles, 'Actual': y_actual, 'Pred': y_pred})
+            st.dataframe(res_df.head(20))
+            
+            # --- [CSV 내보내기 버튼 추가] ---
+            csv_data = res_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 결과 CSV 다운로드",
+                data=csv_data,
+                file_name=f"SOH_Result_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime='text/csv'
+            )
